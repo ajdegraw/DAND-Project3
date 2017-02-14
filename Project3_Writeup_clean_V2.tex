@@ -1,0 +1,565 @@
+\documentclass{article}
+
+
+\usepackage[margin=0.75in]{geometry}
+%\usepackage{url}
+\usepackage{hyperref}
+\usepackage{listings}
+\usepackage{graphicx}
+\usepackage{minted}
+\usepackage{fancyhdr}
+\renewcommand{\baselinestretch}{1} 
+
+\rhead{Project 3 - OSM Data}
+\lhead{A. J. DeGraw}
+\pagestyle{fancy}
+
+%\baselinestretch
+
+
+\begin{document}
+
+\section{OpenStreetMap Data Project - SQL}
+\subsection{Map Description}
+
+The greater Phoenix, Arizona area.
+
+
+As I will be moving to Scottsdale, Arizona, I chose to investigate the OpenStreetMap data for the greater Phoenix Metro Area which includes the suburban regions of Scottsdale, Apache Junction, Fountain Hills, Glendale, Tempe, Mesa and several others including the city of Phoenix itself.
+
+Data was retrieved from the \url{http://overpass-api.de/query_form.html} query form using a latitude, longitude bounding box of the Phoenix area and data saved to the default osm format.  The greater Phoenix area data file sizes are shown: 
+\begin{minted}{shell}
+
+artdegraw ~/Proj3_Py27_SpyProj > ls -l Phx_metro*
+-rw-r--r-- 1 artdegraw artdegraw 320561152 Feb  9 23:47 Phx_metro.db
+-rw-r--r-- 1 artdegraw artdegraw 580518138 Feb  7 09:08 Phx_metro.osm
+
+\end{minted}
+
+\subsection{Problems in the Map Data}
+There were several problems that I noticed in the Phoenix metro data. These problems are listed below:
+\begin{enumerate}
+\item Inconsistent 'postcode' representation:  Some zip codes were represented as 5 digit and some as 9 digit.  Others contained the leading string 'AZ '.
+\item Inconsistent county representation:  In the vast majority of cases the county was listed as 'Maricopa' but in some it was given as 'Maricopa AZ'
+\item Inconsistent city names: these include case issues such as 'MEsa' vs 'Mesa' or 'Laveen' vs 'Laveen Valley' or just simple misspellings.
+\item Incorrect node location: There is at least one node that appears to be a zip code that is not compatible with southern Arizona.
+\end{enumerate}
+
+As the Phoenix metro OpenStreetMap data set was rather large, a smaller subset consisting of the Scottsdale area was first used as test set for the programmatic features that manipulate the data. The first two problems mentioned above could be treated rather simply with a string manipulation. The data was extracted from the osm file and into separate csv files using a modified \textbf{data.py} file (see section 4.1 for code).  To construct the sqlite3 database with tables created using the provided schema, a function was made to both create the tables and load them from the csv files (see section 4.2 for code).
+
+\subsection{Creating Consistent Zip Codes}
+The inconsistency in zip code representation came in three varieties: 5 digit code, 9 digit code with 5 digit hyphen 4 digit, and a five digit with a leading 'AZ ' string as in the examples '85302', '85260-5518', 'AZ 85007'.  On the smaller Scottsdale data set these three were the only issues with zip codes.  On the larger Phoenix metro data set however, there were others such as single digit and some nine-digit proceeded by 'AZ ' and some with special characters (specified by '\textbackslash xe2 \textbackslash x80 \textbackslash x8e').  The sequence of scripts will address most of these concerns.
+
+\begin{itemize}
+\item To address the zip codes that started out with 'AZ ', the relevant .csv files were loaded into a Pandas data frame directly from the .csv files.  The 'AZ ' was then stripped from the zip codes that contained it. To address the 9 digit zip vs. the 5 digit zip I ran a count of the lengths of the zip codes which showed an overwhelming majority have only  a 5 digit zip code.  So for simplicity I converted all 9 digit to 5 digit by simply splitting the string at '-' and keeping the value of the first 5 digits as the new zip code.  To check the results, once the database was loaded with the auditted values:
+
+\begin{minipage}{0.5\textwidth}
+\begin{minted}{sql}
+sqlite> select value, count(*)
+   ...> from nodes_tags
+   ...> where nodes_tags.key = 'postcode'
+   ...> group by nodes_tags.value
+   ...> order by count(*) desc;
+\end{minted}
+\end{minipage}
+\begin{minipage}{0.4\textwidth}
+\begin{tabular}{r|l}
+zip&count\\\hline
+85028&1701\\
+85301&652\\
+%85303&217\\
+%85305&143\\
+%85210&122\\
+%85032&121\\
+%85254&96\\
+$\vdots$&$\vdots$\\
+%85342&1\\
+%85388&1\\
+92127&1\\
+92509&1\\
+95295&1\\
+\end{tabular}
+\end{minipage}
+
+As noted previously, there are zip codes that appear to belong to Southern California: 92127 - San Diego, 92509 - Riverside, and an invalid one 95295 - invalid zip code according to usps.com.
+\end{itemize}
+
+
+\subsection{City Name Inconsistency}
+
+The city names seem to have some misspellings and capitalization issues. 
+
+\begin{minipage}{0.5\textwidth}
+\begin{minted}{sql}
+sqlite> select tags.value, count(*) as count
+   ...> from (select * from nodes_tags union all
+   ...> select * from way_tags) tags
+   ...> where tags.key = 'city'
+   ...> group by tags.value
+   ...> order by count desc;
+   
+\end{minted}
+\end{minipage}
+\begin{minipage}[r]{0.45\textwidth}
+\begin{tabular}{r|l}
+City&count\\\hline
+Phoenix&20844\\
+Glendale&4872\\
+Scottsdale&1745\\
+Mesa&1137\\
+Peoria&1001\\
+$\vdots$&$\vdots$\\
+
+Tohono Oodham&1\\
+Tollenson&1\\
+mesa&1\\
+peoria&1\\
+scottsdale&1\\
+sun City West&1\\
+tEMPE&1\\
+\end{tabular}
+\end{minipage}
+
+To help remedy the city name inconsistencies, the names were compared to a city/town list for Maricopa County, Arizona, obtained from \url{http://phoenix.about.com/od/govtcity/qt/cities-towns-maricopa-county.htm}.  City names were compared using the \textbf{ SequenceMatcher} method from the \textbf{ difflib} package.  This feature determines a numerical score for similarity between two strings.  If the score is near 1.0 then the strings are considered to be quite similar.  If the score is near 0.0 then the strings are considered to be rather dissimilar.  The strings were compared in a way that did not account for case sensitivity to help pick up on misspellings in the score and not capitalization issues. That is, two strings with the same spelling with varying capitalization would score a 1.0, showing that they are infact the same word with two different representations. The function that was written can address both case sensitivity and insensitivity in the scoring
+
+%\begin{minted}{python}
+%cities = ['Apache Junction','Avondale','Buckeye','Carefree','Cave Creek',\
+%			'Chandler','El Mirage','Fountain Hills','Gila Bend','Gilbert',\
+%			'Glendale','Goodyear','Guadalupe','Litchfield Park','Mesa','Paradise Valley',\
+%			'Peoria','Phoenix','Queen Creek','Scottsdale','Surprise','Tempe',\
+%			'Tolleson','Wickenburg','Youngtown']
+%          
+%def best_match(text, match_list, case = False):
+%    from difflib import SequenceMatcher
+%    max_match = 0
+%    best_match = ''
+%    for compare in match_list:
+%        if case == False:
+%            match_score = SequenceMatcher(None, text.lower(), compare.lower()).ratio()
+%        elif case == True:
+%            match_score = SequenceMatcher(None, text, compare).ratio()
+%        if match_score > max_match:
+%            max_match = match_score
+%            best_match = compare
+%        else:
+%            continue
+%    return (best_match, max_match)
+%    
+%
+%unmatched = []
+%for i in range(len(ways_tags)):
+%    if ways_tags['key'][i] == 'city':
+%        match, score = best_match(ways_tags['value'][i], cities, case=False)
+%        if score > 0.6:
+%            ways_tags.loc[i,'value'] = match
+%        else:
+%            unmatched.append(ways_tags['value'][i])
+%
+%\end{minted}
+
+While this did not fix the entire problem, it at least helped to resolve it.  For analysis purposes, I created a list of unmatched city names, that is names that did not meet the criteria as having a city/town name in the list that was `close enough' to any element of the list .  For the \textbf{ways\_tags} data the unmatched names were
+\begin{minted}{python}
+{'2036 N. Gilbert Rd.', 'Gold Canyon', 'Laveen', 'Laveen Village', 'Maricopa', 'Riverside',
+ 'San Diego', 'San Tan Valley', 'Sun City', 'Sun City West', 'Tohono Oodham', 'Wittmann'}
+\end{minted}
+
+The list of unmatched names is rather short as hoped.  This list does contain some southern California cities as suspected.  The apparent street address entry of '2036 N. Gilbert Rd.' was edited to now have a `key' value of `street' instead of `city' as it was here.  
+
+It should be noted that there was some similarity among the city names themselves.  The names of "Cave Creek" and "Queen Creek" at 2/3 had the highest similarity score. This could lead to a misspelling of one being mistaken for a misspelling of the other.  However, it should be the case that a misspelling of "Cave Creek" should still yield a higher similarity score than it would to "Queen Creek", as the `best\_match' function searches for the match with the highest score not just a large one.  But this is a concern, nonetheless.  To help fix this concern, the threshold score of 0.6 could be increased, but this would also diminish the ability of the task to catch the names that were spelled rather poorly.
+
+\subsection{City Versus Zip}
+To partially address the potential mislabeling of addresses within the valley as simply `Phoenix' I performed a sql query on the cities and postcodes.  Since the data that I wanted to related lived in the same table (key=city and key=postcode) I performed a self join.  What I was looking for was whether or not one postcode had associated with it more than one city.  This would stand out as a potential error since postcodes are a refinement of the city designation for postal addresses.  The code and result:
+\vskip.1in
+\begin{minipage}{.5\textwidth}
+\begin{minted}{sql}
+select t.id, t.value, s.value 
+from(
+	select id, value
+	from nodes_tags
+	where key = 'city') t 
+	join
+	(
+	select id, value
+	from nodes_tags
+	where key = 'postcode'
+	) s
+where t.id = s.id
+order by s.value;
+
+\end{minted}
+\end{minipage}
+\begin{minipage}{.5\textwidth}
+\begin{tabular}{r|c|l}
+id\quad\quad & city&postcode\\\hline
+359293112&Phoenix&85003\\
+2469618342&Phoenix&85004\\
+3833145142&Phoenix&85006\\
+4560431809&Phoenix&85007\\
+$\vdots$ &$\vdots$ & $\vdots$\\
+2074055545&Wittmann&85361\\
+4329328824&Surprise&85374\\
+4422428383&Sun City West&85375\\
+3085412764&Peoria&85381\\
+3224573738&Peoria&85382\\
+\end{tabular}
+\end{minipage}
+
+
+\subsection{Street Abbreviations}
+For the 'Street' vs. 'St' vs. 'St.' inconsistencies and the like I used a straight string comparison in a list with punctuation removed only on the 'key' = 'street' elements.  The decided convention was to use eliminate the abbreviations and include the entire word.  As there are several common abbreviation for different words, the potential abbreviations were loading into a list and compared to words in the street name after stripping away punctuation.  For ease of application, a function was written to also accept a data frame and run the code over the appropriate column in the data frame. The code was run on the \textbf{ways\_tags} and \textbf{nodes\_tags} Pandas data frames.
+
+
+\begin{minted}{python}
+import string
+conventions = [['West','W'],['North','N'],["South","S"],['East','E'],\
+		['Street',"St"],["Road","Rd"],["Avenue","Av","Ave"],\
+		["Place","Pl"],["Boulevard","Blvd"],["Trail","Tr"],\
+		["Place","Pl"],["Highway","Hwy","Hw","Hy"],["Parkway","Pkwy","Pw"]]
+		
+num_conventions = len(conventions)
+
+def conv_street(street_name):
+    split_up = street_name.split(" ")
+    for i in range(len(split_up)):
+        for j in range(num_conventions):
+            #Strip punctuation and compare to naming conventions list
+            if split_up[i].translate(None, string.punctuation) in conventions[j]:
+                split_up[i] = conventions[j][0]
+    whole = ' '.join(c for c in split_up)
+    return whole
+
+def conv_df(df):
+    for i in range(len(df)):
+        if df.loc[i,'key'] == 'street':
+            df.loc[i,'value'] = conv_street(df.loc[i,'value'])
+    return df
+    
+   
+    
+\end{minted}
+
+\subsection{State Values}
+A similar procedure was applied to the `key' = `state' field as the variation in how the state was identified was large: \{'A', 'AS', 'AZ', 'AZ (Arizona)', 'AZZ', 'Arizona', 'Az', 'TX', 'US', 'az'\}
+
+Any value contained in \{'A', 'AS', 'AZ', 'AZ (Arizona)', 'AZZ', 'Arizona', 'Az', 'az'\} was set to simply 'AZ' as long as the field `type' was `addr'.  There was another value for the `type' field of 'is\_in' which was specifically left alone.  I only felt it necessary to change the `addr' type values since the postal address abbreviation is `AZ'
+
+\section{Some SQL Database Queries}
+The number of unique users in the ways and nodes tables is 1216 and a simpler query yields the number of ways and nodes as 334539 and 2383267 respectively as shown below.
+
+\begin{minted}{sql}
+sqlite> select count(distinct user) from
+   ...> (select user from nodes union select user from ways) tags;
+1216
+sqlite> select count(*) as c from nodes;
+2383267
+sqlite> select count(*) as c from ways;
+334539
+
+
+\end{minted}
+
+Keeping the ways and nodes tables separate the number of designated coffee or cafe points in each table is 74 and 316 respectively.
+
+\begin{minted}{sql}
+   ...> way_tags  
+   ...> where value like '%cafe%'
+   ...> or
+   ...> value like '%coffee%';
+74
+sqlite> select count(*) as c 
+   ...> from nodes_tags
+   ...> where value like '%cafe%'
+   ...> or           
+   ...> value like '%coffee%';
+316
+
+\end{minted}
+
+Some slightly more complicated queries are contained in the subsection ``City Versus Zip'' and the following section.
+
+\section{Further Work}
+
+It would be interesting to see how the nodes are distributed around the suburban areas.  Are they essentially uniformly scattered or are they concentrated in certain areas?  If the data is user contributed, my guess is that they would tend to be concentrated around places that are most visited rather than uniformly distributed.  To test this theory, one could look at the distribution of nodes as an overlay on a map of the Phoenix area.  The difficulty here is not in the data retrieval, as this is all contained in the nodes tables but in the display of the data.  Some information on using Python to display maps and data can be found at \url{http://sensitivecities.com/so-youd-like-to-make-a-map-using-python-EN.html\#.WKKF0lUrJpg}
+But, since this is a project on using map data and not creating a map, I instead thought to that one could simply average the latitude / longitude values for each suburban town/city and see how close this was to the actual city center or commercial center of the town/city.  An example for Scottsdale, AZ is shown below using SQL:
+
+\begin{minted}{sql}
+select avg(nodes.lon), avg(nodes.lat)
+from nodes join nodes_tags
+on nodes.id = nodes_tags.id
+where nodes_tags.key = 'city' 
+and nodes_tags.value = 'Scottsdale';
+-111.954555026667|33.5950626666667
+\end{minted}
+
+If I had to pick a ``city center'' of Scottsdale, I would choose the historic or Old Town Scottsdale which is located around the geographic coordinates of -111.91126 longitude and 33.494107 latitude.  The SQL results are a point that is nearly 10 miles away but is more in the geographic center of Scottsdale.  This may make one to lean towards the points in the nodes data set to be more uniformly spread about the city, but it is only one of many suburbs.
+
+
+%\section{Appendix A}
+%\subsection{data.py}
+%\begin{minted}{python}
+%"""from data.py
+%This will extract fields from the OpenStreetMap XML file and store various field values in ways
+%and nodes CSV files. Parsing of field values includig ':' and separately problem characters
+%(not a-z,:) is done.  The field vlaues that are extracted are included in the
+% 'NODE_FIELDS','NODE_TAGS_PATH','WAYS_PATH','WAY_NODES_PATH','WAY_TAGS_PATH' lists.  The 
+%schema is validated as well.
+%
+%A small subset of the data was validated with the provided function and then validation
+% set to False for larger data set.
+%"""
+%
+%OSM_PATH = "Phx_metro.osm"
+%
+%NODES_PATH = "nodes.csv"
+%NODE_TAGS_PATH = "nodes_tags.csv"
+%WAYS_PATH = "ways.csv"
+%WAY_NODES_PATH = "ways_nodes.csv"
+%WAY_TAGS_PATH = "ways_tags.csv"
+%
+%LOWER_COLON = re.compile(r'^([a-z]|_)+:([a-z]|_)+')
+%PROBLEMCHARS = re.compile(r'[=\+/&<>;\'"\?%#$@\,\. \t\r\n]')
+%
+%SCHEMA = schema.schema
+%
+%# Make sure the fields order in the csvs matches the column order in the sql table schema
+%NODE_FIELDS = ['id', 'lat', 'lon', 'user', 'uid', 'version', 'changeset', 'timestamp']
+%NODE_TAGS_FIELDS = ['id', 'key', 'value', 'type']
+%WAY_FIELDS = ['id', 'user', 'uid', 'version', 'changeset', 'timestamp']
+%WAY_TAGS_FIELDS = ['id', 'key', 'value', 'type']
+%WAY_NODES_FIELDS = ['id', 'node_id', 'position']
+%
+%
+%def shape_element(element, node_attr_fields=NODE_FIELDS, way_attr_fields=WAY_FIELDS,
+%                  problem_chars=PROBLEMCHARS, default_tag_type='regular'):
+%    """Clean and shape node or way XML element to Python dict"""
+%
+%    node_attribs = {}
+%    way_attribs = {}
+%    way_nodes = []
+%    tags = []  # Handle secondary tags the same way for both node and way elements
+%    
+%
+%    if element.tag == 'node':
+%        #build top level node_attributes
+%        for att in NODE_FIELDS:
+%            node_attribs[att] = element.attrib[att]
+%        
+%        #build node_tags
+%        position = 0
+%        for child in element:
+%            if child.tag == 'tag':
+%                tag = {}
+%                tag['id'] = element.attrib['id']
+%                #parse k attrib with a colon or two
+%                if bool(LOWER_COLON.search(child.attrib['k'])):
+%                    k = child.attrib['k'].split(':')
+%                    if len(k) == 3:
+%                        tag['key']=k[1]+':'+k[2]
+%                    elif len(k) == 2:
+%                        tag['key'] = k[1]
+%                    tag['type']= k[0]
+%                    tag['value'] = child.attrib['v'] 
+%                    
+%                elif not bool(PROBLEMCHARS.search(child.attrib['k'])):
+%                    tag['type'] = 'regular'
+%                    tag['value']=child.attrib['v']
+%                    tag['id'] = element.attrib['id']
+%                    tag['key'] = child.attrib['k']
+%            
+%                tags.append(tag)
+%        return {'node': node_attribs, 'node_tags' : tags}
+%                
+%    elif element.tag == 'way':
+%        #build top level way_attribs
+%        for att in WAY_FIELDS:
+%            way_attribs[att] = element.attrib[att]
+%        
+%        #build way_tags
+%        position = 0
+%        for child in element:
+%            if child.tag == 'tag':
+%                tag = {}
+%                tag['id'] = element.attrib['id']
+%                #parse k attrib with a colon or two
+%                if bool(LOWER_COLON.search(child.attrib['k'])):
+%                    k = child.attrib['k'].split(':')
+%                    if len(k) == 3:
+%                        tag['key']=k[1]+':'+k[2]
+%                    elif len(k) == 2:
+%                        tag['key'] = k[1]
+%                    tag['type']= k[0]
+%                    tag['value'] = child.attrib['v'] 
+%                    
+%                elif not bool(PROBLEMCHARS.search(child.attrib['k'])):
+%                    tag['type'] = 'regular'
+%                    tag['value']=child.attrib['v']
+%                    tag['id'] = element.attrib['id']
+%                    tag['key'] = child.attrib['k']
+%            
+%                tags.append(tag)
+%            
+%            if child.tag == 'nd':
+%                nodes = {}
+%                nodes['id'] = element.attrib['id']
+%                nodes['node_id'] = child.attrib['ref']
+%                nodes['position'] = position
+%                position += 1
+%                way_nodes.append(nodes)
+%            
+%        return {'way': way_attribs, 'way_nodes': way_nodes, 'way_tags': tags}
+%
+%
+%# ================================================== #
+%#               Helper Functions                     #
+%# ================================================== #
+%def get_element(osm_file, tags=('node', 'way', 'relation')):
+%    """Yield element if it is the right type of tag"""
+%
+%    context = ET.iterparse(osm_file, events=('start', 'end'))
+%    _, root = next(context)
+%    for event, elem in context:
+%        if event == 'end' and elem.tag in tags:
+%            yield elem
+%            root.clear()
+%
+%
+%def validate_element(element, validator, schema=SCHEMA):
+%    """Raise ValidationError if element does not match schema"""
+%    if validator.validate(element, schema) is not True:
+%        field, errors = next(validator.errors.iteritems())
+%        message_string = "\nElement of type '{0}' has the following errors:\n{1}"
+%        error_string = pprint.pformat(errors)
+%        
+%        raise Exception(message_string.format(field, error_string))
+%
+%
+%class UnicodeDictWriter(csv.DictWriter, object):
+%    """Extend csv.DictWriter to handle Unicode input"""
+%
+%    def writerow(self, row):
+%        super(UnicodeDictWriter, self).writerow({
+%            k: (v.encode('utf-8') if isinstance(v, unicode) else v) for k, v in row.iteritems()
+%        })
+%
+%    def writerows(self, rows):
+%        for row in rows:
+%            self.writerow(row)
+%
+%
+%# ================================================== #
+%#               Main Function                        #
+%# ================================================== #
+%def process_map(file_in, validate):
+%    """Iteratively process each XML element and write to csv(s)"""
+%
+%    with codecs.open(NODES_PATH, 'w') as nodes_file, \
+%         codecs.open(NODE_TAGS_PATH, 'w') as nodes_tags_file, \
+%         codecs.open(WAYS_PATH, 'w') as ways_file, \
+%         codecs.open(WAY_NODES_PATH, 'w') as way_nodes_file, \
+%         codecs.open(WAY_TAGS_PATH, 'w') as way_tags_file:
+%
+%        nodes_writer = UnicodeDictWriter(nodes_file, NODE_FIELDS)
+%        node_tags_writer = UnicodeDictWriter(nodes_tags_file, NODE_TAGS_FIELDS)
+%        ways_writer = UnicodeDictWriter(ways_file, WAY_FIELDS)
+%        way_nodes_writer = UnicodeDictWriter(way_nodes_file, WAY_NODES_FIELDS)
+%        way_tags_writer = UnicodeDictWriter(way_tags_file, WAY_TAGS_FIELDS)
+%
+%        nodes_writer.writeheader()
+%        node_tags_writer.writeheader()
+%        ways_writer.writeheader()
+%        way_nodes_writer.writeheader()
+%        way_tags_writer.writeheader()
+%
+%        validator = cerberus.Validator()
+%
+%        for element in get_element(file_in, tags=('node', 'way')):
+%            el = shape_element(element)
+%            if el:
+%                if validate is True:
+%                    validate_element(el, validator)
+%
+%                if element.tag == 'node':
+%                    nodes_writer.writerow(el['node'])
+%                    node_tags_writer.writerows(el['node_tags'])
+%                elif element.tag == 'way':
+%                    ways_writer.writerow(el['way'])
+%                    way_nodes_writer.writerows(el['way_nodes'])
+%                    way_tags_writer.writerows(el['way_tags'])
+%
+%
+%if __name__ == '__main__':
+%    # Note: Validation is ~ 10X slower. For the project consider using a small
+%    # sample of the map when validating.
+%    process_map(OSM_PATH, validate=False)
+%\end{minted}
+%
+%\subsection{Creating and Loading Database}
+%\begin{minted}{python}
+%import sqlite3
+%import csv
+%
+%def db_table_from_csv(db_name, file_name, table_name, keys = [], key_params = []):
+%    '''file_name: name of csv file, 
+%    table: name of table to create in db_name, 
+%    keys: columsn of .csv file_name to include in db table
+%    key_params: parameters for data type for each field in table'''
+%
+%    con = sqlite3.connect(db_name)
+%    cur = con.cursor()
+%
+%    #Creation of nodes ways table
+%    cur.execute("DROP TABLE IF EXISTS " + table_name + ";")
+%    con.commit()
+%    
+%    create_str = "" #holds schema string to pass to sql
+%    for i in range(len(keys)):
+%        create_str = create_str + keys[i] + " " + key_params[i]+","
+%    create_str = create_str[:-1]
+%    cur.execute("CREATE TABLE " + table_name + "("+create_str+");")
+%
+%    con.commit()
+%    with open(file_name, 'rb') as fin:
+%        dr = csv.DictReader(fin)
+%        to_db = [[i[key].decode("utf-8") for key in keys] for i in dr]
+%    
+%    key_str = ""
+%    key_qs = ""
+%    for key in keys:
+%        key_str = key_str+key+","
+%        key_qs = key_qs + "?," #just how many fields to enter into db
+%    key_qs = key_qs[:-1] #strip comma at end
+%    key_str=key_str[:-1]
+%    
+%    #insert data into db according to keys
+%    cur.executemany("INSERT INTO "+table_name+"("+key_str+") VALUES ("+key_qs+");", to_db)
+%    con.commit()
+%
+%    con.close()
+%    return
+%
+%
+%
+%DB_NAME = 'Phx_metro.db'
+%NODE_FIELDS = ['id', 'lat', 'lon', 'user', 'uid', 'version', 'changeset', 'timestamp']
+%NODE_TAGS_FIELDS = ['id', 'key', 'value', 'type']
+%WAY_FIELDS = ['id', 'user', 'uid', 'version', 'changeset', 'timestamp']
+%WAY_TAGS_FIELDS = ['id', 'key', 'value', 'type']
+%WAY_NODES_FIELDS = ['id', 'node_id', 'position']
+%
+%NODE_PARAMS = ['INTEGER PRIMARY KEY NOT NULL', 'REAL', 'REAL', 'TEXT', 'INTEGER', \
+%	'TEXT', 'INTEGER', 'DATE']
+%NODE_TAGS_PARAMS = ['INTEGER NOT NULL', 'TEXT NOT NULL', 'TEXT NOT NULL', 'TEXT NOT NULL']
+%WAY_PARAMS = ['INTEGER NOT NULL', 'TEXT NOT NULL', 'INTEGER NOT NULL', 'TEXT NOT NULL', \
+%	'INTEGER NOT NULL', 'TEXT NOT NULL']
+%WAY_NODES_PARAMS = ['INTEGER NOT NULL', 'INTEGER NOT NULL', 'INTEGER NOT NULL']
+%WAY_TAGS_PARAMS = ['INTEGER NOT NULL', 'TEXT NOT NULL', 'TEXT NOT NULL', 'TEXT NOT NULL']
+%
+%
+%db_table_from_csv(DB_NAME, 'nodes.csv', 'nodes', NODE_FIELDS, NODE_PARAMS)
+%db_table_from_csv(DB_NAME, 'nodes_tags.csv', 'nodes_tags', NODE_TAGS_FIELDS, NODE_TAGS_PARAMS)
+%db_table_from_csv(DB_NAME, 'ways.csv', 'ways', WAY_FIELDS, WAY_PARAMS)
+%db_table_from_csv(DB_NAME, 'ways_tags.csv', 'way_tags', WAY_TAGS_FIELDS, WAY_TAGS_PARAMS)
+%db_table_from_csv(DB_NAME, 'ways_nodes.csv', 'way_nodes', WAY_NODES_FIELDS, WAY_NODES_PARAMS)
+%
+%\end{minted}
+\end{document}
